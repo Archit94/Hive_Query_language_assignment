@@ -1,0 +1,982 @@
+-- STEP 1: Set the current database (rajp_live) to be used for further hive operations
+USE rajp_live;
+
+-- STEP 2: IMPORTANT: BEFORE CREATING ANY TABLE, MAKE SURE YOU RUN THIS COMMAND
+ADD JAR /opt/cloudera/parcels/CDH/lib/hive/lib/hive-hcatalog-core-1.1.0-cdh5.11.2.jar;
+
+-- STEP 3: IMPORTANT: Before partitioning any table, make sure you run the below commands.
+SET hive.exec.max.dynamic.partitions=100000;
+SET hive.exec.max.dynamic.partitions.pernode=100000;
+
+-- STEP 4: CREATE EXTERNAL TABLE nyc_taxi to load data from text file located in HDFS Path into Hive
+    CREATE EXTERNAL TABLE IF NOT EXISTS rajp_live.nyc_taxi(
+        VendorID INT COMMENT '1= Creative Mobile Technologies, LLC; 2= VeriFone Inc.',
+        Tpep_pickup_datetime TIMESTAMP COMMENT 'The date and time when the meter was engaged',
+        Tpep_dropoff_datetime TIMESTAMP COMMENT 'The date and time when the meter was disengaged',
+        Passenger_count INT COMMENT 'The number of passengers in the vehicle. This is a driver-entered value',
+        Trip_distance DOUBLE COMMENT 'The elapsed trip distance in miles reported by the taximeter',
+        RateCodeID INT COMMENT '1= Standard rate, 2=JFK, 3=Newark, 4=Nassau or Westchester, 5=Negotiated fare, 6=Group ride',
+        Store_and_fwd_flag CHAR(1) COMMENT 'Y= store and forward trip, N= not a store and forward trip',
+        PULocationID INT COMMENT 'TLC Taxi Zone in which the taximeter was engaged',
+        DOLocationID INT COMMENT 'TLC Taxi Zone in which the taximeter was disengaged',
+        Payment_type INT COMMENT '1= Credit card, 2= Cash, 3= No charge, 4= Dispute, 5= Unknown, 6= Voided trip',
+        Fare_amount DOUBLE COMMENT 'The time-and-distance fare calculated by the meter',
+        Extra DOUBLE COMMENT 'Miscellaneous extras and surcharges. Currently, this only includes the $0.50 and $1 rush hour and overnight charges',
+        MTA_tax DOUBLE COMMENT '$0.50 MTA tax that is automatically triggered based on the metered rate in use',
+        Tip_amount DOUBLE COMMENT 'This field is automatically populated for credit card tips. Cash tips are not included',
+        Tolls_amount DOUBLE COMMENT 'Tolls paid in trip',
+        Improvement_surcharge DOUBLE COMMENT '$0.30 improvement surcharge assessed trips at the flag drop',
+        Total_amount DOUBLE COMMENT 'The total amount charged to passengers. Does not include cash tips')
+    COMMENT 'This table describes yellow taxi trip data for a green taxi data, or a map of the TLC Taxi Zones'
+    -- Limitations
+    -- This SerDe treats all columns to be of type String.
+    ROW FORMAT SERDE 'org.apache.hadoop.hive.serde2.OpenCSVSerde'
+    --The SerDe properties are passed to the table's SerDe when it is being initialized by Hive to serialize and deserialize data
+    WITH SERDEPROPERTIES (
+        -- Specifying timestamp format columns contains in HDFS file
+        'timestamp.formats'='yyyy-MM-dd HH:mm:ss',
+        -- Each columns seperator using "comma" delimiter records conatins in HDFS file
+        'separatorChar'=',',
+        -- Skip first record in HDFS file as it is header
+        'skip.header.line.count'='1')
+     -- Stored as plain text file, translated by Regular Expression.
+    STORED AS TEXTFILE
+    -- Source data HDFS location file is stored
+    LOCATION '/common_folder/nyc_taxi_data';
+
+-- STEP 5: SELECT statement is used to retrieve the data from a table
+-- The LIMIT clause can be used to constrain the number of rows returned by the SELECT statement.
+select * from nyc_taxi limit 10;
+
+--STEP 6: Performing record count post data load into table
+select Count(*) from nyc_taxi; -- count the number of rows in table
+-- Query Output
+-- nyc_taxi table contains 1,174,569 Records
+
+
+--****************************************************************************************
+--                                 2. Basic Data Quality Checks
+--****************************************************************************************
+
+-- 2.1. How many records has each TPEP provider provided?
+--      Write a query that summarises the number of records of each provider.
+
+    SELECT
+        vendorid,
+        count(*) AS ProviderCount   -- count the number of rows, which aggregate over Vendorid
+    FROM nyc_taxi
+    GROUP BY vendorid               -- The group by key and an aggregation function Count
+    ORDER BY vendorid ASC;          -- Specifying the sorting order for each of the columns
+-- Query output
+-- VendorID Count Record Count based on each Vendor ID
+-- Out of 1,174,569 records, VendorID 1 have 527,386 records and VendorID 2 have 647,183 records
+-- +----------+--------------+
+-- | vendorid |ProviderCount |
+-- +----------+--------------+
+-- | 1        | 527,386      |
+-- | 2        | 647,183      |
+-- +----------+--------------+
+
+
+-- 2.2  The data provided is for months November and December only.
+--      Check whether the data is consistent, and if not, identify the data quality issues.
+--      Mention all data quality issues in comments.
+
+-- 2.2.1. Records fall under Pickup Year 2017 and Pickup Months November and December
+   SELECT
+        YEAR(Tpep_pickup_datetime) PUYr,        -- Returns the Pickup year part of a timestamp string
+        MONTH(Tpep_pickup_datetime) PUMth,      -- Returns the Pickup Month part of a timestamp string
+        YEAR(Tpep_dropoff_datetime) DOYr,       -- Returns the Dropoff year part of a timestamp string
+        MONTH(Tpep_dropoff_datetime) DOMth,     -- Returns the Dropoff Month part of a timestamp string
+        count(*) AS PUCount,                    -- count the number of rows, which aggregate over PUYr, PUMth, DOYr,DOMth
+        count(*) AS DOCount                     -- count the number of rows, which aggregate over PUYr, PUMth, DOYr,DOMth
+    FROM nyc_taxi
+    WHERE
+        YEAR(Tpep_pickup_datetime) = 2017 AND   -- Filter Year 2017
+        MONTH(Tpep_pickup_datetime) in (11,12)  -- Filter Month November and December
+    GROUP BY                                    -- The group by key and an aggregation function Count
+        YEAR(Tpep_pickup_datetime),
+        MONTH(Tpep_pickup_datetime),
+        YEAR(Tpep_dropoff_datetime),
+        MONTH(Tpep_dropoff_datetime)
+    ORDER BY PUYr, DOYr, PUMth, DOMth ASC;      -- Specifying the sorting order for each of the columns
+-- Query output
+-- >> Out of 1,174,569 records, 1,168,001 records fall under Pickup Year 2017 and Pickup Months November and December
+-- >> Nov 2017 Pickup - 576,731 records have drop on the same month
+-- >> Nov 2017 Pickup - 250 records have drop on Next month (Dec 2017)
+-- >> Dec 2017 Pickup - 590,913 records have drop on the same month
+-- >> Dec 2017 Pickup - 106 records have drop on the Next month (Jan 2018)
+-- >> Dec 2017 Pickup - 1 record have drop on Apr 2019, which is not a valid records
+-- +------+-------+------+-------+---------+---------+
+-- | PUYr | PUMth | DOYr | DOMth | PUCount | DOCount |
+-- +------+-------+------+-------+---------+---------+
+-- + 2017 | 11    | 2017 | 11    | 576,731 | 576,731 |
+-- + 2017 | 11    | 2017 | 12    | 250     | 250     |
+-- + 2017 | 12    | 2017 | 12    | 590,913 | 590,913 |
+-- + 2017 | 12    | 2018 | 1     | 106     | 106     |
+-- + 2017 | 11    | 2019 | 4     | 1       | 1       |
+-- +------+-------+------+-------+---------+---------+
+
+-- 2.2.2. Excluding invalide record having DropOff Year 2019
+   SELECT
+        YEAR(Tpep_pickup_datetime) PUYr,            -- Returns the Pickup year part of a timestamp string
+        MONTH(Tpep_pickup_datetime) PUMth,          -- Returns the Pickup Month part of a timestamp string
+        YEAR(Tpep_dropoff_datetime) DOYr,           -- Returns the Dropoff year part of a timestamp string
+        MONTH(Tpep_dropoff_datetime) DOMth,         -- Returns the Dropoff Month part of a timestamp string
+        count(*) AS PUCount,                        -- count the number of rows, which aggregate over PUYr, PUMth, DOYr,DOMth
+        count(*) AS DOCount                         -- count the number of rows, which aggregate over PUYr, PUMth, DOYr,DOMth
+    FROM nyc_taxi
+    WHERE
+        YEAR(Tpep_pickup_datetime) = 2017 AND       -- Filter Year 2017
+        MONTH(Tpep_pickup_datetime) in (11,12) AND  -- Filter Month November and December
+        YEAR(Tpep_dropoff_datetime) <> 2019 AND     -- Excluding Dropoff Year 2019 as its invalid record
+        -- Including the records contains Pickup time less than Dropoff time
+        unix_timestamp(Tpep_pickup_datetime, "yyyy-MM-dd HH:mm:ss") < unix_timestamp(Tpep_dropoff_datetime, "yyyy-MM-dd HH:mm:ss")
+    GROUP BY                                        -- The group by key and an aggregation function Count
+        YEAR(Tpep_pickup_datetime),
+        MONTH(Tpep_pickup_datetime),
+        YEAR(Tpep_dropoff_datetime),
+        MONTH(Tpep_dropoff_datetime)
+    ORDER BY PUYr, DOYr, PUMth, DOMth ASC;          -- Specifying the sorting order for each of the columns
+
+-- Query output
+-- >> Out of 1,168,000 records fall under Pickup Year 2017 and Pickup Months November and December
+-- >> Nov 2017 Pickup - 576,731 records have drop on the same month
+-- >> Nov 2017 Pickup - 250 records have drop on Next month (Dec 2017)
+-- >> Dec 2017 Pickup - 590,913 records have drop on the same month
+-- >> Dec 2017 Pickup - 106 records have drop on the Next month (Jan 2018)
+-- +------+-------+------+-------+---------+---------+
+-- | PUYr | PUMth | DOYr | DOMth | PUCount | DOCount |
+-- +------+-------+------+-------+---------+---------+
+-- + 2017 | 11    | 2017 | 11    | 576,731 | 576,731 |
+-- + 2017 | 11    | 2017 | 12    | 250     | 250     |
+-- + 2017 | 12    | 2017 | 12    | 590,913 | 590,913 |
+-- + 2017 | 12    | 2018 | 1     | 106     | 106     |
+-- +------+-------+------+-------+---------+---------+
+
+-- 2.2.3. Verifying in valid records having Pickup time is less than Drop time
+    SELECT
+        -- CASE Statement once a condition is found to be true, the case statement will return the result
+        -- Performing case condition to return 0 for valid records and 1 for invalide records
+        CASE WHEN unix_timestamp(Tpep_pickup_datetime, "yyyy-MM-dd HH:mm:ss") > unix_timestamp(Tpep_dropoff_datetime, "yyyy-MM-dd HH:mm:ss")  THEN 1 ELSE 0 END AS ValidRecord,
+        Count(*)                                    -- count the number of rows, which aggregate over case condition
+    FROM nyc_taxi
+    WHERE
+        YEAR(Tpep_pickup_datetime) = 2017 AND       -- Filter Picup Year 2017
+        MONTH(Tpep_pickup_datetime) in (11,12) AND  -- Filter Pickup Month November and December
+        YEAR(Tpep_dropoff_datetime) <> 2019         -- Filter Dropoff Year not in 2019 as its invalid
+    GROUP BY -- The group by key and an aggregation function Count
+        CASE WHEN unix_timestamp(Tpep_pickup_datetime, "yyyy-MM-dd HH:mm:ss") > unix_timestamp(Tpep_dropoff_datetime, "yyyy-MM-dd HH:mm:ss")  THEN 1 ELSE 0 END;
+
+-- Query Output
+-- Out of 1,174,568 records:
+-- >> Valid records Flag 0 has 1,174,481
+-- >> Invalid records Flag 1 has 73
+-- +--------+-----------+
+-- | Valid  | Record    |
+-- | Flag   | Count     |
+-- +--------+-----------+
+-- | 0      | 1,174,481 |
+-- | 1      | 73        |
+-- +--------+-----------+
+
+-- 2.2.4. Performing records count based on Trip Duration by Hour
+   SELECT
+        -- Calculation Trip Duration in Hours
+        -- >> by performing calculation (Tpep_dropoff_datetime - Tpep_pickup_datetime) to find time difference
+        -- >> Converting Seconds into Hours by dividing 3600
+        -- >> Perform round function to close to integer
+        round((unix_timestamp(Tpep_dropoff_datetime, "yyyy-MM-dd HH:mm:ss") - unix_timestamp(Tpep_pickup_datetime, "yyyy-MM-dd HH:mm:ss") ) / 3600) as TripDurinHR,
+        count(*) CountTripDurinHR                   -- count the number of rows, which aggregate over Trip Duration in Hours
+    FROM nyc_taxi
+    WHERE
+        YEAR(Tpep_pickup_datetime) = 2017 AND       -- Filter Picup Year 2017
+        MONTH(Tpep_pickup_datetime) in (11,12) AND  -- Filter Pickup Month November and December
+        YEAR(Tpep_dropoff_datetime) <> 2019 AND     -- Filter Dropoff Year not in 2019 as its invalid
+        -- Including the records contains Pickup time less than Dropoff time
+        unix_timestamp(Tpep_pickup_datetime, "yyyy-MM-dd HH:mm:ss") < unix_timestamp(Tpep_dropoff_datetime, "yyyy-MM-dd HH:mm:ss")
+    GROUP BY                                        -- The group by key and an aggregation function Count
+        round((unix_timestamp(Tpep_dropoff_datetime, "yyyy-MM-dd HH:mm:ss") - unix_timestamp(Tpep_pickup_datetime, "yyyy-MM-dd HH:mm:ss") ) / 3600)
+    ORDER BY TripDurinHR ASC;                       -- Specifying the sorting order for each of the columns
+-- Query output
+-- Out of 1,174,568 records below output shows the Trip count categorized based on Trip Duration in Hours
+-- Trip Duration in Hour 0 have 1,053,946 records i.e. ~ 90% of the records falls under
+-- +----------+----------+
+-- | Trip     | Count of |
+-- | Duration | Trip     |
+-- | (in Hr)  | Duration |
+-- +----------+----------+
+-- | 0        | 1,053,946|
+-- | 1        | 110,305  |
+-- | 2        | 1,225    |
+-- | 3        | 41       |
+-- | 4        | 11       |
+-- | 5        | 10       |
+-- | 6        | 20       |
+-- | 7        | 12       |
+-- | 8        | 18       |
+-- | 9        | 9        |
+-- | 10       | 20       |
+-- | 11       | 20       |
+-- | 12       | 8        |
+-- | 13       | 11       |
+-- | 14       | 12       |
+-- | 15       | 6        |
+-- | 16       | 15       |
+-- | 17       | 9        |
+-- | 18       | 11       |
+-- | 19       | 5        |
+-- | 20       | 6        |
+-- | 21       | 18       |
+-- | 22       | 30       |
+-- | 23       | 579      |
+-- | 24       | 1,653    |
+-- +----------+----------+
+
+-- 2.2.5. Analyzing records count based on Trip Duration by Hour = 0
+    SELECT
+        count(*) as CountTripduration               -- count the number of rows in table
+    FROM nyc_taxi
+    WHERE
+        YEAR(Tpep_pickup_datetime) = 2017 AND       -- Filter Picup Year 2017
+        MONTH(Tpep_pickup_datetime) in (11,12) AND  -- Filter Pickup Month November and December
+        YEAR(Tpep_dropoff_datetime) <> 2019 AND     -- Filter Dropoff Year not in 2019 as its invalid
+        passenger_count = 0 AND                     -- Filtering Passenger Count = 0 as it could be cancelled or Invalid records
+        -- Including the records contains Pickup time less than Dropoff time
+        unix_timestamp(Tpep_pickup_datetime, "yyyy-MM-dd HH:mm:ss") < unix_timestamp(Tpep_dropoff_datetime, "yyyy-MM-dd HH:mm:ss") AND
+        -- Filtering Trip Duration in Hours = 0
+        round((unix_timestamp(Tpep_dropoff_datetime, "yyyy-MM-dd HH:mm:ss") - unix_timestamp(Tpep_pickup_datetime, "yyyy-MM-dd HH:mm:ss"))/3600) = 0;
+-- Query output
+-- Out of 1,053,946 records 6,102 records contains:
+-- >> Passenger Count = 0 and Trid duration less than 1 Hour
+-- >> 6,102 records could be invlaid or Trip Cancelled
+
+
+-- 2.3. You might have encountered unusual or erroneous rows in the dataset.
+--      Can you conclude which vendor is doing a bad job in providing the records using different columns of the dataset?
+--      Summarise your conclusions based on every column where these errors are present.
+--      For example,  There are unusual passenger count, i.e. 0 which is unusual.
+
+-- 2.3.1. Passenger Count Record Count based on each Vendor ID
+    SELECT
+        Passenger_count,
+        SUM(CASE WHEN vendorid = 1 THEN 1 ELSE 0 END) AS VendorID1, -- count the number of rows for VendorID=1 for each PassengerCount
+        SUM(CASE WHEN vendorid = 2 THEN 1 ELSE 0 END) AS VendorID2  -- count the number of rows for VendorID=2 for each PassengerCount
+    FROM nyc_taxi
+    GROUP BY Passenger_count                                        -- The group by key and an aggregation function Count
+    ORDER BY Passenger_count asc;                                   -- Specifying the sorting order for each of the columns
+-- Query output
+-- Vendor 2 has 4 records Passenger Count 8 and 9  As car has maximum 7 seaters
+-- Vendor 1 has 6,813 Passenger Count 0 compare with Vendor 2
+-- Passenger Count 0 could be due to Trip cancellation or Invalid records
+-- +-----------+------------+------------+
+-- | Passenger | Count of   | Count of   |
+-- | Count     | VendorID=1 | VendorID=2 |
+-- +-----------+------------+------------+
+-- | 0         | 6,813       | 11        |
+-- | 1         | 415,346     | 412,153   |
+-- | 2         | 74,640      | 102,232   |
+-- | 3         | 18,710      | 31,983    |
+-- | 4         | 11,310      | 13,641    |
+-- | 5         | 361         | 54,207    |
+-- | 6         | 205         | 32,941    |
+-- | 7         | 1           | 11        |
+-- | 8         | 0           | 3         |
+-- | 9         | 0           | 1         |
+-- +-----------+------------+------------+
+
+-- 2.3.2. ratecodeid Record Count based on each Vendor ID
+    SELECT
+        ratecodeid,
+        SUM(CASE WHEN vendorid = 1 THEN 1 ELSE 0 END) AS VendorID1, -- count the number of rows for VendorID=1 for each ratecodeid
+        SUM(CASE WHEN vendorid = 2 THEN 1 ELSE 0 END) AS VendorID2  -- count the number of rows for VendorID=2 for each ratecodeid
+    FROM nyc_taxi
+    GROUP BY ratecodeid         -- The group by key and an aggregation function Count
+    ORDER BY ratecodeid asc;    -- Specifying the sorting order for each of the columns
+-- Query output
+-- As Rate Code ID should be between 1 and 6
+-- Vendor 1 has 8 records of Rate Code ID 99
+-- Vendor 2 has 1 records of Rate Code ID 99
+-- +-----------+------------+------------+
+-- | Rate      | Count of   | Count of   |
+-- | Code ID   | VendorID=1 | VendorID=2 |
+-- +-----------+------------+------------+
+-- | 1         | 513,991    | 628,287    |
+-- | 2         | 10,544     | 14,794     |
+-- | 3         | 1,186      | 1,376      |
+-- | 4         | 230        | 356        |
+-- | 5         | 1,425      | 2,368      |
+-- | 6         | 2          | 1          |
+-- | 99        | 8          | 1          |
+-- +-----------+------------+------------+
+
+-- 2.3.3. Store_and_fwd_flag Record Count based on each Vendor ID
+    SELECT
+        Store_and_fwd_flag,
+        SUM(CASE WHEN vendorid = 1 THEN 1 ELSE 0 END) AS VendorID1, -- count the number of rows for VendorID=1 for each Store_and_fed_flag
+        SUM(CASE WHEN vendorid = 2 THEN 1 ELSE 0 END) AS VendorID2  -- count the number of rows for VendorID=1 for each Store_and_fed_flag
+    FROM nyc_taxi
+    GROUP BY Store_and_fwd_flag         -- The group by key and an aggregation function Count
+    ORDER BY Store_and_fwd_flag asc;    -- Specifying the sorting order for each of the columns
+-- Query output
+-- Both Vendor 1 and 2 are entering good quality of records
+-- Vendor 2 doesnt store in vehicle memory before sending
+-- +-----------+------------+------------+
+-- | Store and | Count of   | Count of   |
+-- | Fwd FLAG  | VendorID=1 | VendorID=2 |
+-- +-----------+------------+------------+
+-- | N         | 523,435    | 647,183    |
+-- | Y         | 3,951      | 0          |
+-- +-----------+------------+------------+
+
+-- 2.3.4. Payment_type Record Count based on each Vendor ID
+    SELECT
+        Payment_type,
+        SUM(CASE WHEN vendorid = 1 THEN 1 ELSE 0 END) AS VendorID1, -- count the number of rows for VendorID=1 for each Payment_type
+        SUM(CASE WHEN vendorid = 2 THEN 1 ELSE 0 END) AS VendorID2  -- count the number of rows for VendorID=1 for each Payment_type
+    FROM nyc_taxi
+    GROUP BY Payment_type       -- The group by key and an aggregation function Count
+    ORDER BY Payment_type asc;  -- Specifying the sorting order for each of the columns
+-- Query output
+-- Both Vendor 1 and Vendor 2 have Quality data
+-- +-----------+------------+------------+
+-- | Payment   | Count of   | Count of   |
+-- | Type      | VendorID=1 | VendorID=2 |
+-- +-----------+------------+------------+
+-- | 1         | 353,034    | 437,222    |
+-- | 2         | 166,970    | 209,404    |
+-- | 3         | 5,861      | 413        |
+-- | 4         | 1,521      | 144        |
+-- +-----------+------------+------------+
+
+-- 2.3.5. Extra Record Count based on each Vendor ID
+    SELECT
+        Extra,
+        SUM(CASE WHEN vendorid = 1 THEN 1 ELSE 0 END) AS VendorID1, -- count the number of rows for VendorID=1 for Extra
+        SUM(CASE WHEN vendorid = 2 THEN 1 ELSE 0 END) AS VendorID2  -- count the number of rows for VendorID=2 for Extra
+    FROM nyc_taxi
+    GROUP BY Extra      -- The group by key and an aggregation function Count
+    ORDER BY Extra asc;  -- Specifying the sorting order for each of the columns
+-- Query output
+-- This should only includes $0.50 and $1
+-- >> Vendor 1: -$10.6 has 1 record, $1.5 has 2 records, $2.0 has 1 records, $4.5 has 1,819 records
+-- >> Vendor 2: -$0.5 has 193 records, -$1.0 has 87 records, -$4.5 has 5 records, $0.3 has 36 records,
+-- >>           $0.8 has 15 records, $1.3 has 13 records, $4.5 has 2,683 records
+-- >> Vendor 2 has more incorrect data compare with Vendor 1
+-- +-----------+------------+------------+
+-- | Extra     | Count of   | Count of   |
+-- |           | VendorID=1 | VendorID=2 |
+-- +-----------+------------+------------+
+-- | -0.5      | 0          | 193        |
+-- | -1.0      | 0          | 87         |
+-- | -10.6     | 1          | 0          |
+-- | -4.5      | 0          | 5          |
+-- | 0.0       | 284,273    | 347,599    |
+-- | 0.3       | 0          | 36         |
+-- | 0.5       | 161,608    | 201,847    |
+-- | 0.8       | 0          | 15         |
+-- | 1.0       | 79,682     | 94,704     |
+-- | 1.3       | 0          | 13         |
+-- | 1.5       | 2          | 0          |
+-- | 2.0       | 1          | 0          |
+-- | 4.5       | 1,819      | 2,683      |
+-- | 4.8       | 0          | 1          |
+-- +-----------+------------+------------+
+
+-- 2.3.6. MTA_tax Record Count based on each Vendor ID
+    SELECT
+        MTA_tax,
+        SUM(CASE WHEN vendorid = 1 THEN 1 ELSE 0 END) AS VendorID1, -- count the number of rows for VendorID=1 for MTA_tax
+        SUM(CASE WHEN vendorid = 2 THEN 1 ELSE 0 END) AS VendorID2  -- count the number of rows for VendorID=2 for MTA_tax
+    FROM nyc_taxi
+    GROUP BY MTA_tax        -- The group by key and an aggregation function Count
+    ORDER BY MTA_tax asc;   -- Specifying the sorting order for each of the columns
+-- Query output
+-- As MTA_tax $0.50 MTA tax that is automatically triggered based on the metered rate in use
+-- Vendor 1 has $0.0 of 2,711 records, $11.4 for 1 record
+-- Vendor 2 has -$0.0 of 544 records, $0.0 of 2,486 records, $3.0 of 3 records
+-- Vendor 2 has more number of invalid records compare with Vendor 1
+-- +-----------+------------+------------+
+-- | MTA       | Count of   | Count of   |
+-- | TAX       | VendorID=1 | VendorID=2 |
+-- +-----------+------------+------------+
+-- | -0.5      | 0          | 544        |
+-- | 0.0       | 2,711      | 2,486      |
+-- | 0.5       | 524,674    | 644,150    |
+-- | 11.4      | 1          | 0          |
+-- | 3.0       | 0          | 3          |
+-- +-----------+------------+------------+
+
+-- 2.3.7. Improvement_surcharge Record Count based on each Vendor ID
+    SELECT
+        Improvement_surcharge,
+        SUM(CASE WHEN vendorid = 1 THEN 1 ELSE 0 END) AS VendorID1, -- count the number of rows for VendorID=1 for Improvement_surcharge
+        SUM(CASE WHEN vendorid = 2 THEN 1 ELSE 0 END) AS VendorID2  -- count the number of rows for VendorID=2 for Improvement_surcharge
+    FROM nyc_taxi
+    GROUP BY Improvement_surcharge      -- The group by key and an aggregation function Count
+    ORDER BY Improvement_surcharge asc; -- Specifying the sorting order for each of the columns
+-- Query output
+-- Vendor 1 has $0.0 of 61 records
+-- Vendor 2 has -$0.3 of 558 records, $0.0 has 226 records, $1.0 has 4 records
+-- Vendor 2 has more number of invalid records compare with Vendor 1
+-- +-------------+------------+------------+
+-- | Improvement | Count of   | Count of   |
+-- | Surcharge   | VendorID=1 | VendorID=2 |
+-- +-------------+------------+------------+
+-- | -0.3        | 0          | 558        |
+-- | 0.0         | 61         | 226        |
+-- | 0.3         | 527,325    | 646,395    |
+-- | 1.0         | 0          | 4          |
+-- +-------------+------------+------------+
+
+-- 2.3.8. Tip_amount Record Count based on each Vendor ID
+    SELECT
+        -- 0 indicate Negative Trip amount
+        -- 1 indicate Positive Trip amount
+        (CASE WHEN Tip_amount > 0 THEN 1 ELSE 0 END)  as Tip_amount_ind,
+        SUM(CASE WHEN vendorid = 1  THEN 1 ELSE 0 END) AS VendorID1,    -- count the number of rows for VendorID=1 for Tip_amount
+        SUM(CASE WHEN vendorid = 2  THEN 1 ELSE 0 END) AS VendorID2     -- count the number of rows for VendorID=2 for Tip_amount
+    FROM nyc_taxi
+    GROUP BY (CASE WHEN Tip_amount > 0 THEN 1 ELSE 0 END)   -- The group by key and an aggregation function Count
+    ORDER BY Tip_amount_ind asc;    -- Specifying the sorting order for each of the columns
+-- Query output
+-- Vendor 2 have 233,712 records with negative Trip Amount compare Vendor 1
+-- Vendor 2 have more number of invalid records compare with Vendor 1
+-- +-------------+------------+------------+
+-- | Tip         | Count of   | Count of   |
+-- | Amount Ind  | VendorID=1 | VendorID=2 |
+-- +-------------+------------+------------+
+-- | 0           | 184,127    | 233,712    |
+-- | 1           | 343,259    | 413,471    |
+-- +-------------+------------+------------+
+
+-- 2.3.9. Tolls_amount Record Count based on each Vendor ID
+    SELECT
+        -- 0 indicate Negative Tolls amount
+        -- 1 indicate Positive Tolls amount
+        (CASE WHEN Tolls_amount > 0 THEN 1 ELSE 0 END) as Tolls_amount,
+        SUM(CASE WHEN vendorid = 1 THEN 1 ELSE 0 END) AS VendorID1, -- count the number of rows for VendorID=1 for Tolls_amount
+        SUM(CASE WHEN vendorid = 2 THEN 1 ELSE 0 END) AS VendorID2  -- count the number of rows for VendorID=2 for Tolls_amount
+    FROM nyc_taxi
+    GROUP BY (CASE WHEN Tolls_amount > 0 THEN 1 ELSE 0 END) -- The group by key and an aggregation function Count
+    ORDER BY Tolls_amount asc;      -- Specifying the sorting order for each of the columns
+-- Query output
+-- Vendor 2 have 611,433 records with negative Tolls Amount compare Vendor 1
+-- Vendor 2 have more number of invalid records compare with Vendor 1
+-- +-------------+------------+------------+
+-- | tolls       | Count of   | Count of   |
+-- | amount IND  | VendorID=1 | VendorID=2 |
+-- +-------------+------------+------------+
+-- | 0           | 501,919    | 611,433    |
+-- | 1           | 25,467     | 35,750     |
+-- +-------------+------------+------------+
+
+-- 2.3.10. Total_amount Record Count based on each Vendor ID
+    SELECT
+        -- 0 indicate Negative Total amount
+        -- 1 indicate Positive Total amount
+        (CASE WHEN Total_amount > 0 THEN 1 ELSE 0 END) AS Total_amount,
+        SUM(CASE WHEN vendorid = 1 THEN 1 ELSE 0 END) AS VendorID1, -- count the number of rows for VendorID=1 for Total_amount
+        SUM(CASE WHEN vendorid = 2 THEN 1 ELSE 0 END) AS VendorID2  -- count the number of rows for VendorID=2 for Total_amount
+    FROM nyc_taxi
+    GROUP BY (CASE WHEN Total_amount > 0 THEN 1 ELSE 0 END) -- The group by key and an aggregation function Count
+    ORDER BY Total_amount asc;   -- Specifying the sorting order for each of the columns
+-- Query output
+-- Vendor 2 have 639 records with negative Total Amount compare Vendor 1
+-- Vendor 2 have more number of invalid records compare with Vendor 1
+-- +-------------+------------+------------+
+-- | Total       | Count of   | Count of   |
+-- | amount IND  | VendorID=1 | VendorID=2 |
+-- +-------------+------------+------------+
+-- | 0           | 42         | 639        |
+-- | 1           | 527,344    | 646,544    |
+-- +-------------+------------+------------+
+
+select
+    PULocationID,
+    count(*)
+from nyc_taxi
+group by PULocationID
+order by PULocationID asc
+
+select
+    DOLocationID,
+    count(*)
+from nyc_taxi
+group by DOLocationID
+order by DOLocationID asc
+
+--****************************************************************************************
+--                                   CONCLUSION
+--****************************************************************************************
+-- 2.3.1.- Passenger Count
+--          Vendor 2 has 4 records Passenger Count 8 and 9  As car has maximum 7 seaters
+--          Vendor 1 has 6,813 records for  Passenger Count 0 and Vendor 2 has 11 records
+--          Passenger Count 0 could be due to Trip cancellation
+--          Vendor 2 has more incorrect data compare with Vendor 1
+
+-- 2.3.2. - Rate Code ID
+--          As Rate Code ID should be between 1 and 6
+--          Vendor 1 has 8 records of Rate Code ID 99
+--          Vendor 2 has 1 records of Rate Code ID 99
+--          Vendor 1 has more incorrect data compare with Vendor 2
+
+-- 2.3.3. - Store_and_fwd_flag
+--          Both Vendor 1 and 2 are entering good quality of records
+--          Vendor 2 doesnt store in vehicle memory before sending
+
+-- 2.3.4. - Payment Type
+--          Both Vendor 1 and Vendor 2 have Quality data
+
+-- 2.3.5. - Extra
+--          This column should only includes $0.50 and $1
+--          Vendor 1: -$10.6 has 1 record, $1.5 has 2 records, $2.0 has 1 records, $4.5 has 1,819 records
+--          Vendor 2: -$0.5 has 193 records, -$1.0 has 87 records, -$4.5 has 5 records, $0.3 has 36 records,
+--                     $0.8 has 15 records, $1.3 has 13 records, $4.5 has 2,683 records
+--          Vendor 2 has more incorrect data compare with Vendor 1
+
+-- 2.3.6. - MTA_tax
+--          As MTA_tax $0.50 MTA tax that is automatically triggered based on the metered rate in use
+--          Vendor 1 has $0.0 of 2,711 records, $11.4 for 1 record
+--          Vendor 2 has -$0.0 of 544 records, $0.0 of 2,486 records, $3.0 of 3 records
+--          Vendor 2 has more number of invalid records compare with Vendor 1
+
+-- 2.3.7. - Improvement_surcharge
+--          As $0.30 improvement surcharge assessed trips at the flag drop
+--          Vendor 1 has $0.0 of 61 records
+--          Vendor 2 has -$0.3 of 558 records, $0.0 has 226 records, $1.0 has 4 records
+--          Vendor 2 has more number of invalid records compare with Vendor 1
+
+-- 2.3.8. - Tip_amount
+--          Vendor 2 have 233,712 records with negative Trip Amount compare Vendor 1
+--          Vendor 2 have more number of invalid records compare with Vendor 1
+
+--2.3.9. - Tolls_amount
+--          Vendor 2 have 611,433 records with negative Tolls Amount compare Vendor 1
+--          Vendor 2 have more number of invalid records compare with Vendor 1
+
+--2.3.10. - Total_amount
+--          Vendor 2 have 639 records with negative Total Amount compare Vendor 1
+--          Vendor 2 have more number of invalid records compare with Vendor 1
+
+-- As majority of the columns have Invalid records for Vendor 2
+-- Vendor 2 is doing a bad job in providing the records
+
+
+--****************************************************************************************
+--                         3. ORC partitioned table for analysis
+--****************************************************************************************
+
+-- STEP 1:  Create Temporary Stage table to load data from nyc_taxi with filter condition
+--          to remove invalid records based on Analysis performed in Section 2
+
+-- Temporary intermediate table created for data generated during a large or complex query execution.
+    CREATE TEMPORARY TABLE rajp_live.nyc_taxi_temp_stage AS
+    SELECT
+        VendorID,
+        Tpep_pickup_datetime,
+        Tpep_dropoff_datetime,
+        Passenger_count,
+        Trip_distance,
+        RateCodeID,
+        Store_and_fwd_flag,
+        PULocationID,
+        DOLocationID,
+        Payment_type,
+        Fare_amount,
+        Extra,
+        MTA_tax,
+        Tip_amount,
+        Tolls_amount,
+        Improvement_surcharge,
+        Total_amount,
+        Month(Tpep_pickup_datetime) as Mth -- This column will be used for Partition purpose
+    FROM rajp_live.nyc_taxi
+    WHERE
+        YEAR(Tpep_pickup_datetime) = 2017 AND       -- Filter Year 2017
+        MONTH(Tpep_pickup_datetime) in (11,12) AND  -- Filter Month November and December
+        YEAR(Tpep_dropoff_datetime) <> 2019 AND     -- Excluding Dropoff Year 2019 as its invalid record
+        ratecodeid not in (99) AND                  -- Excluding Rate Code ID 99 as it should be between 1 and 6
+        Extra in (0.0,0.5,1.0) AND                  -- Filtering as this should only includes $0.50 and $1
+        mta_tax  = 0.5 AND                          -- Filtering as MTA_tax $0.50 MTA tax that is automatically triggered based on the metered rate in use
+        Improvement_surcharge = 0.3 AND             -- Filtering as $0.30 improvement surcharge assessed trips at the flag drop
+        Total_amount > 0 AND                        -- Filtering Total Amount greater than 0 as Total Amount can't be negative
+        -- Including the records contains Pickup time less than Dropoff time
+        unix_timestamp(Tpep_pickup_datetime, "yyyy-MM-dd HH:mm:ss") < unix_timestamp(Tpep_dropoff_datetime, "yyyy-MM-dd HH:mm:ss") AND
+        -- Excluding Passenger Count = 0 and trip duration is less than hour as it could be cancelled or Invalid records
+        (passenger_count not in (0,7,8,9) AND
+        round((unix_timestamp(Tpep_dropoff_datetime, "yyyy-MM-dd HH:mm:ss") - unix_timestamp(Tpep_pickup_datetime, "yyyy-MM-dd HH:mm:ss"))/3600) = 0);
+
+-- STEP 2: Checking record count post data load
+    select count(*) from rajp_live.nyc_taxi_temp_stage
+-- Query Output: 1,045,319 rows return
+
+
+-- STEP 3: Reviewing data are loaded with correct format
+    Select * from rajp_live.nyc_taxi_temp_stage limit 10;
+
+
+--STEP 4:   Create ORC table nyc_taxi_orc_partition having Month as partition key
+--          as we are anlaysis only for year 2017
+
+    CREATE EXTERNAL TABLE IF NOT EXISTS rajp_live.nyc_taxi_orc_partition(
+        VendorID INT COMMENT '1= Creative Mobile Technologies, LLC; 2= VeriFone Inc.',
+        Tpep_pickup_datetime TIMESTAMP COMMENT 'The date and time when the meter was engaged',
+        Tpep_dropoff_datetime TIMESTAMP COMMENT 'The date and time when the meter was disengaged',
+        Passenger_count INT COMMENT 'The number of passengers in the vehicle. This is a driver-entered value',
+        Trip_distance DOUBLE COMMENT 'The elapsed trip distance in miles reported by the taximeter',
+        RateCodeID INT COMMENT '1= Standard rate, 2=JFK, 3=Newark, 4=Nassau or Westchester, 5=Negotiated fare, 6=Group ride',
+        Store_and_fwd_flag STRING COMMENT 'Y= store and forward trip, N= not a store and forward trip',
+        PULocationID INT COMMENT 'TLC Taxi Zone in which the taximeter was engaged',
+        DOLocationID INT COMMENT 'TLC Taxi Zone in which the taximeter was disengaged',
+        Payment_type INT COMMENT '1= Credit card, 2= Cash, 3= No charge, 4= Dispute, 5= Unknown, 6= Voided trip',
+        Fare_amount DOUBLE COMMENT 'The time-and-distance fare calculated by the meter',
+        Extra DOUBLE COMMENT 'Miscellaneous extras and surcharges. Currently, this only includes the $0.50 and $1 rush hour and overnight charges',
+        MTA_tax DOUBLE COMMENT '$0.50 MTA tax that is automatically triggered based on the metered rate in use',
+        Tip_amount DOUBLE COMMENT 'This field is automatically populated for credit card tips. Cash tips are not included',
+        Tolls_amount DOUBLE COMMENT 'Tolls paid in trip',
+        Improvement_surcharge DOUBLE COMMENT '$0.30 improvement surcharge assessed trips at the flag drop',
+        Total_amount DOUBLE COMMENT 'The total amount charged to passengers. Does not include cash tips')
+    COMMENT 'This ORC table describes yellow taxi trip data for a green taxi data, or a map of the TLC Taxi Zones'
+    -- Partitioned by Month
+    PARTITIONED BY (Mth int)
+
+    -- ORC Partition file storage location
+    STORED AS ORC LOCATION '/user/hive/warehouse/rajp_live/nyc_taxi'
+
+     -- ORC file compress type Snappy
+    TBLPROPERTIES ("orc.compress"="SNAPPY");
+
+-- STEP 5:  Writing data from nyc_taxi_temp_stage table into ORC table nyc_taxi_orc_partition
+--          2 Partition folder has been created:
+--              1. /user/hive/warehouse/rajp_live/nyc_taxi/mth=11
+--              2. /user/hive/warehouse/rajp_live/nyc_taxi/mth=12
+--          Each Partition File contains 10.3 MB of File Size
+
+    INSERT OVERWRITE TABLE rajp_live.nyc_taxi_orc_partition PARTITION(mth)
+    SELECT
+        VendorID,
+        Tpep_pickup_datetime,
+        Tpep_dropoff_datetime,
+        Passenger_count,
+        Trip_distance,
+        RateCodeID,
+        Store_and_fwd_flag,
+        PULocationID,
+        DOLocationID,
+        Payment_type,
+        Fare_amount,
+        Extra,
+        MTA_tax,
+        Tip_amount,
+        Tolls_amount,
+        Improvement_surcharge,
+        Total_amount,
+        mth
+    FROM rajp_live.nyc_taxi_temp_stage;
+
+-- STEP 6: Show partition of the given table
+    SHOW PARTITIONS rajp_live.nyc_taxi_orc_partition;
+-- Query restult
+-- +-----------+
+-- | Partition |
+-- +-----------+
+-- | mth=11    |
+-- | mth=12    |
+-- +-----------+
+
+-- STEP 7: Checking record count post data load
+    select count(*) from rajp_live.nyc_taxi_orc_partition;
+-- Query Return 1,045,319 rows
+
+-- STEP 8: Reviewing data are loaded with correct format
+select * from rajp_live.nyc_taxi_orc_partition limit 10;
+
+--****************************************************************************************
+--                                    4. Analysis-I
+--****************************************************************************************
+
+--4.1. Compare the overall average fare per trip for November and December.
+
+   SELECT
+        YEAR(Tpep_pickup_datetime) PUYr,        -- Returns the Pickup year part of a timestamp string
+        MONTH(Tpep_pickup_datetime) PUMth,      -- Returns the Pickup Month part of a timestamp string
+        avg(Fare_amount) AS AVGFareAmount       -- count the number of rows, which aggregate over PUYr, PUMth, DOYr,DOMth
+    FROM nyc_taxi_orc_partition
+    WHERE
+        YEAR(Tpep_pickup_datetime) = 2017 AND   -- Filter Year 2017
+        MONTH(Tpep_pickup_datetime) in (11,12)
+    GROUP BY                                    -- The group by key and an aggregation function Count
+        YEAR(Tpep_pickup_datetime),
+        MONTH(Tpep_pickup_datetime)
+-- Query output
+-- Average Fare Amount of November is more compare with December
+-- +------+------------+-------------------+
+-- | PUYr | PUMth      | AVG Fare Amt      |
+-- +------+------------+-------------------+
+-- | 2017 | 11         | 10.39796230423014 |
+-- | 2017 | 12         | 10.33598501605692 |
+-- +------+------------+-------------------+
+
+
+-- 4.2. Explore the ‘number of passengers per trip’ - how many trips are made by each level of ‘Passenger_count’?
+--      Do most people travel solo or with other people?
+    SELECT
+        Passenger_count,
+        count(vendorid) as TripCount    -- count the number of rows for VendorID=1 for each PassengerCount
+    FROM nyc_taxi_orc_partition
+    GROUP BY Passenger_count            -- The group by key and an aggregation function Count
+    ORDER BY TripCount DESC;            -- Specifying the sorting order for each of the columns
+-- Query output
+-- Peopele travel more Solo than with other people
+-- +-----------+---------+
+-- | Passenger | Trip    |
+-- | Count     | Count   |
+-- +-----------+---------+
+-- | 1         | 743,047 |
+-- | 2         | 156,627 |
+-- | 5         |  48,733 |
+-- | 3         |  45,156 |
+-- | 6         |  29,633 |
+-- | 4         |  22,123 |
+-- +-----------+---------+
+
+-- 4.3. Which is the most preferred mode of payment?
+    SELECT
+        payment_type,
+        count(vendorid) as TripCount    -- count the number of rows for VendorID=1 for each PassengerCount
+    FROM nyc_taxi_orc_partition
+    GROUP BY payment_type               -- The group by key and an aggregation function Count
+    ORDER BY TripCount DESC;            -- Specifying the sorting order for each of the columns
+-- Query output
+-- The most preferred mode of payment is 1 i.e. Credit Card
+-- +---------+---------+
+-- | Payment | Trip    |
+-- | Type    | Count   |
+-- +---------+---------+
+-- | 1       | 699,782 |
+-- | 2       | 340,091 |
+-- | 3       |   4,261 |
+-- | 4       |   1,185 |
+-- +---------+---------+
+
+-- 4.4. What is the average tip paid per trip?
+--      Compare the average tip with the 25th, 50th and 75th percentiles and comment whether the ‘average tip’
+--      is a representative statistic (of the central tendency) of ‘tip amount paid’.
+--      Hint:   You may use percentile_approx(DOUBLE col, p): Returns an approximate pth percentile
+--              of a numeric column (including floating point types) in the group.
+    SELECT
+        round(AVG(tip_amount),2) as AvgTipAmount,
+        PERCENTILE_APPROX(cast(tip_amount as double),0.25) 25thPercentileTipAmount, -- Returns the exact 25th percentile of a column in the group
+        PERCENTILE_APPROX(cast(tip_amount as double),0.50) 50thPercentileTipAmount, -- Returns the exact 50th percentile of a column in the group
+        PERCENTILE_APPROX(cast(tip_amount as double),0.75) 75thPercentileTipAmount  -- Returns the exact 75th percentile of a column in the group
+    FROM nyc_taxi_orc_partition;
+
+-- Query output
+-- As AVG Tip Amount $1.48 falls under ~56th Percentile
+-- Is not a representative statistic (of the central tendency)
+-- +---------+-----------------+-----------------+-----------------+
+-- | AVG Tip | 25th Percentile | 50th Percentile | 75th Percentile |
+-- | Amount  | Tip Amount      | Tip Amount      | Tip Amount      |
+-- +---------+-----------------+-----------------+-----------------+
+-- | 1.48    | 0               | 1.26            | 2.2             |
+-- +---------+-----------------+-----------------+-----------------+
+
+--4.5.  Explore the ‘Extra’ (charge) variable - what fraction of total trips have an extra charge is levied?
+    SELECT
+        -- 1. Perform case Statement to apply indicator as 1 if exta amount is greater than zero
+        -- 2. Aggregate (Sum) case output to get # of Trips with Exta Charges
+        -- 3. Count(*) would provide total number of records in table / Total # of Trips
+        -- 4. # of Trips with Extra Charge / Total # of Trips
+        SUM(CASE WHEN extra <> 0 THEN 1 ELSE 0 END) / Count(*)
+    FROM nyc_taxi_orc_partition;
+-- Query Output
+-- 0.47257248744163266 fraction of total trips have an extra charge is levied
+
+--****************************************************************************************
+--                                    5. Analysis-II
+--****************************************************************************************
+
+-- 5.1. What is the correlation between the number of passengers on any given trip, and the tip paid per trip?
+--      Do multiple travellers tip more compared to solo travellers? Hint: Use CORR(Col_1, Col_2)
+
+-- Performing Correlation for all Passenger Count
+    SELECT
+        corr(a.passenger_count, a.tip_amount)
+    FROM
+    (
+        SELECT
+            passenger_count,
+            sum(tip_amount) as tip_amount
+        FROM nyc_taxi_orc_partition
+        GROUP BY passenger_count
+    ) a
+-- Query Output
+-- The correlation between the number of passengers on any given trip, and the tip paid per trip -0.7369119856035086
+
+--Performing Correlation by excluding Passenger Count <> 1
+    SELECT
+        corr(a.passenger_count, a.tip_amount)
+    FROM
+    (
+        SELECT
+            passenger_count,
+            sum(tip_amount) as tip_amount
+        FROM nyc_taxi_orc_partition
+        where passenger_count <> 1
+        GROUP BY passenger_count
+    ) a
+-- Query Output
+-- -0.7093680336107668
+
+--Performing Correlation by excluding Passenger Count not in (1,2)
+    SELECT
+        corr(a.passenger_count, a.tip_amount)
+    FROM
+    (
+        SELECT
+            passenger_count,
+            sum(tip_amount) as tip_amount
+        FROM nyc_taxi_orc_partition
+        where passenger_count not in (1,2)
+        GROUP BY passenger_count
+    ) a
+
+-- Query Output
+-- -0.12198182187366949
+
+
+--Performing Correlation by excluding Passenger Count not in (1,2,3)
+    SELECT
+        corr(a.passenger_count, a.tip_amount)
+    FROM
+    (
+        SELECT
+            passenger_count,
+            sum(tip_amount) as tip_amount
+        FROM nyc_taxi_orc_partition
+        where passenger_count not in (1,2,3)
+        GROUP BY passenger_count
+    ) a
+-- Query Output
+-- 0.32500868980701475
+
+--Performing Correlation by excluding Passenger Count not in (1,2,3,4)
+    SELECT
+        corr(a.passenger_count, a.tip_amount)
+    FROM
+    (
+        SELECT
+            passenger_count,
+            sum(tip_amount) as tip_amount
+        FROM nyc_taxi_orc_partition
+        where passenger_count not in (1,2,3,4)
+        GROUP BY passenger_count
+    ) a
+-- Query Output
+-- -0.9999999999999998
+
+--*******************************************************
+--|                   CONCLUSION                        |
+--*******************************************************
+-- ALL Passenger Count              -0.7369119856035086
+-- Passenger Count not solo         -0.7093680336107668
+-- Passenger Count not in (1,2)     -0.12198182187366949
+-- Passenger Count not in (1,2,3)    0.32500868980701475
+-- Passenger Count not in (1,2,3,4) -0.9999999999999998
+
+-- Correlation Increase when Passenger Count Increases
+-- Correlation Decrease when Passenger Count Decrease
+-- Multiple travellers tip more compared to solo travellers
+
+-- 5.2. Segregate the data into five segments of ‘tip paid’: [0-5), [5-10), [10-15) , [15-20) and >=20.
+--      Calculate the percentage share of each bucket (i.e. the fraction of trips falling in each bucket).
+
+    SELECT
+        a.tipSegment,
+        -- 1. Calcaute over all Sum of Tip Segment
+        -- 2. Calcuate Percentage by dividing # of Trip amount of Tip Segment / Over all Sum of Tip Segment
+        round((CountTipSegment / sum(a.CountTipSegment) over())*100,2) PerTripSegment
+    FROM
+    (SELECT
+        -- Case Staement used to create five segments of ‘tip paid’
+        -- i.e. [0-5], [5-10], [10-15] , [15-20] and [>=20]
+        CASE
+            WHEN tip_amount >= 0  AND tip_amount < 5  THEN '[0-5]'
+            WHEN tip_amount >= 5  AND tip_amount < 10 THEN '[5-10]'
+            WHEN tip_amount >= 10 AND tip_amount < 15 THEN '[10-15]'
+            WHEN tip_amount >= 15 AND tip_amount < 20 THEN '[15-20]'
+            WHEN tip_amount >=20 THEN '[>=20]'
+        END as TipSegment,
+        count(*) as CountTipSegment     --count the number of rows, which aggregate over TripSegment
+    FROM nyc_taxi_orc_partition         -- The group by key and an aggregation function Count
+    GROUP BY
+        CASE
+            WHEN tip_amount >= 0  AND tip_amount < 5  THEN '[0-5]'
+            WHEN tip_amount >= 5  AND tip_amount < 10 THEN '[5-10]'
+            WHEN tip_amount >= 10 AND tip_amount < 15 THEN '[10-15]'
+            WHEN tip_amount >= 15 AND tip_amount < 20 THEN '[15-20]'
+            WHEN tip_amount >=20 THEN '[>=20]'
+        END
+    ) a
+
+-- 5.3. Which month has a greater average ‘speed’ - November or December?
+--      Note that the variable ‘speed’ will have to be derived from other metrics.
+--      Hint: You have columns for distance and time.
+
+    SELECT
+        YEAR(Tpep_pickup_datetime) AS PUYr,     -- Returns the Pickup year part of a timestamp string
+        MONTH(Tpep_pickup_datetime) AS PUMth,   -- Returns the Pickup Month part of a timestamp string
+        -- 1. Calcualte Time difference by Substracting columns Tpep_dropoff_datetime - Tpep_pickup_datetime
+        -- 2. Divide Time difference by 3600 to convert Seconds into Hours
+        -- 3. Divide TripDistance/ Speed in Hour
+        -- 4. Calcuate Avg(TripDistance/ Speed in Hour) for each Picup Year and Month
+        AVG(trip_distance / ((unix_timestamp(Tpep_dropoff_datetime, "yyyy-MM-dd HH:mm:ss") - unix_timestamp(Tpep_pickup_datetime, "yyyy-MM-dd HH:mm:ss") ) / 3600)) AS AVGSpeed
+    FROM nyc_taxi_orc_partition
+    GROUP BY -- The group by key and an aggregation function Count
+        YEAR(Tpep_pickup_datetime),
+        MONTH(Tpep_pickup_datetime)
+-- Query Output
+-- December Month has greater average Speed
+-- +---------+-------------------------+
+-- | PUYr | PUMth | AVGSpeed           |
+-- +------+-------+--------------------+
+-- | 2017 | 11    | 10.554371783914572 |
+-- | 2017 | 12    | 10.684260061914685 |
+-- +------+-------+--------------------+
+
+-- 5.4. Analyse the average speed of the most happening days of the year,
+--      i.e. 31st December (New year’s eve) and 25th December (Christmas) and compare it with the overall average.
+
+    SELECT
+        YEAR(Tpep_pickup_datetime) AS PUYr,     -- Returns the Pickup year part of a timestamp string
+        MONTH(Tpep_pickup_datetime) AS PUMth,   -- Returns the Pickup Month part of a timestamp string
+        DAY(Tpep_pickup_datetime) AS PUDATE,    -- Returns the Pickup Date part of a timestamp string
+        -- 1. Calcualte Time difference by Substracting columns Tpep_dropoff_datetime - Tpep_pickup_datetime
+        -- 2. Divide Time difference by 3600 to convert Seconds into Hours
+        -- 3. Divide TripDistance/ Speed in Hour
+        -- 4. Calcuate Avg(TripDistance/ Speed in Hour) for each Picup Year and Month
+        AVG(trip_distance / ((unix_timestamp(Tpep_dropoff_datetime, "yyyy-MM-dd HH:mm:ss") - unix_timestamp(Tpep_pickup_datetime, "yyyy-MM-dd HH:mm:ss") ) / 3600)) AS AVGSpeed
+    FROM nyc_taxi_orc_partition
+    WHERE
+        MONTH(Tpep_pickup_datetime) = 12 AND    -- Filter Month December
+        DAY(Tpep_pickup_datetime) in (25,31)    -- Filter Date 25 and 31
+    GROUP BY -- The group by key and an aggregation function Count
+        YEAR(Tpep_pickup_datetime),
+        MONTH(Tpep_pickup_datetime),
+        DAY(Tpep_pickup_datetime)
+
+    SELECT
+        AVG(trip_distance / ((unix_timestamp(Tpep_dropoff_datetime, "yyyy-MM-dd HH:mm:ss") - unix_timestamp(Tpep_pickup_datetime, "yyyy-MM-dd HH:mm:ss") ) / 3600)) AS AVGOverAllSpeed
+    FROM nyc_taxi_orc_partition; -- 10.62026543332852
+
+-- Query Output
+-- average speed of the most happening days of the year
+-- 31st December (New year’s eve)  is higer i.e. 14.689116028493787 compare with overall AVG Speed 10.62026543332852
+-- 25th December (Christmas) is higer i.e. 12.872578517202983 compare with overall AVG Speed 10.62026543332852
+-- +---------+-------------+--------------------+
+-- | PUYr | PUMth | PUDate | AVGSpeed           |
+-- +------+-------+--------+--------------------+
+-- | 2017 | 12    | 25     | 14.689116028493787 |
+-- | 2017 | 12    | 31     | 12.872578517202983 |
+-- +------+-------+--------+--------------------+
